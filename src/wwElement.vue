@@ -49,19 +49,29 @@ export default {
         const fetchedAt = ref(0);
 
         const cache = getQueryCache();
-        let unsubscribe = null;
-        let refetchIntervalId = null;
         let visibilityHandler = null;
+        let refetchIntervalId = null;
+
+        // --- Key helpers ---
+        function getBaseKey() {
+            return hashKey(props.content.queryKey);
+        }
+
+        function getCompositePageKey(pageParam) {
+            const params = props.content.params || {};
+            const hasParams = Object.keys(params).length > 0;
+            if (hasParams) {
+                return hashKey([props.content.queryKey, params, 'page', pageParam]);
+            }
+            return hashKey([props.content.queryKey, 'page', pageParam]);
+        }
 
         // --- Computed: flattened data from all pages ---
         const data = computed(() => {
-            // Attempt to flatten pages: if each page is an array, concat them
-            // Otherwise return the pages array as-is
             if (pages.value.length === 0) return [];
             if (Array.isArray(pages.value[0])) {
                 return pages.value.flat();
             }
-            // If pages contain objects with a 'data' array, try to flatten that
             const firstPage = pages.value[0];
             if (firstPage && typeof firstPage === 'object' && Array.isArray(firstPage.data)) {
                 return pages.value.flatMap(p => p.data || []);
@@ -108,19 +118,31 @@ export default {
 
                 const method = props.content.method || 'GET';
                 const pageParamKey = props.content.pageParamKey || 'page';
+                const params = props.content.params || {};
                 const headers = { ...(props.content.headers || {}) };
                 const fetchOptions = { method, headers };
 
                 if (method === 'GET') {
-                    // Append page param as query parameter
+                    // Append params + page param as query parameters
                     const url = new URL(endpoint, window.location.origin);
+                    // Add user params first
+                    for (const [key, value] of Object.entries(params)) {
+                        if (value !== undefined && value !== null && value !== '') {
+                            url.searchParams.set(key, String(value));
+                        }
+                    }
+                    // Add page param
                     url.searchParams.set(pageParamKey, String(pageParam));
                     fetchOptions.url = url.toString();
                 } else {
-                    // For POST: merge page param into body
+                    // For POST: merge params + page param into body
                     const contentType = props.content.contentType || 'application/json';
                     headers['Content-Type'] = contentType;
-                    const bodyData = { ...(props.content.body || {}), [pageParamKey]: pageParam };
+                    const bodyData = {
+                        ...(props.content.body || {}),
+                        ...params,
+                        [pageParamKey]: pageParam,
+                    };
                     fetchOptions.body = JSON.stringify(bodyData);
                     fetchOptions.url = endpoint;
                 }
@@ -153,7 +175,6 @@ export default {
                 const nextParam = getByPath(lastPage, path);
                 return nextParam !== undefined && nextParam !== null ? nextParam : undefined;
             }
-            // Default: increment by 1
             const currentParam = pageParams.value[pageParams.value.length - 1]
                 ?? (props.content.initialPageParam ?? 1);
             return currentParam + 1;
@@ -165,7 +186,6 @@ export default {
                 const prevParam = getByPath(firstPage, path);
                 return prevParam !== undefined && prevParam !== null ? prevParam : undefined;
             }
-            // Default: decrement by 1, stop at initial
             const initial = props.content.initialPageParam ?? 1;
             const currentParam = pageParams.value[0] ?? initial;
             return currentParam > initial ? currentParam - 1 : undefined;
@@ -173,16 +193,16 @@ export default {
 
         // --- Core fetch page logic ---
         async function fetchPage(pageParam, direction = 'next') {
-            const cacheKey = hashKey([props.content.queryKey, 'page', pageParam]);
+            const compositeKey = getCompositePageKey(pageParam);
+            const baseKey = getBaseKey();
 
             try {
-                const pageData = await cache.fetch(cacheKey, buildPageFetchFn(pageParam));
+                const pageData = await cache.fetch(compositeKey, buildPageFetchFn(pageParam), baseKey);
 
                 if (direction === 'next') {
                     pages.value = [...pages.value, pageData];
                     pageParams.value = [...pageParams.value, pageParam];
 
-                    // Enforce maxPages
                     const maxPages = props.content.maxPages || 0;
                     if (maxPages > 0 && pages.value.length > maxPages) {
                         pages.value = pages.value.slice(-maxPages);
@@ -192,7 +212,6 @@ export default {
                     pages.value = [pageData, ...pages.value];
                     pageParams.value = [pageParam, ...pageParams.value];
 
-                    // Enforce maxPages
                     const maxPages = props.content.maxPages || 0;
                     if (maxPages > 0 && pages.value.length > maxPages) {
                         pages.value = pages.value.slice(0, maxPages);
@@ -230,10 +249,9 @@ export default {
             if (!props.content.queryKey || !props.content.endpoint) return;
 
             const initialParam = props.content.initialPageParam ?? 1;
-
-            // Check if we already have cached data
-            const cacheKey = hashKey([props.content.queryKey, 'page', initialParam]);
-            const entry = cache.get(cacheKey);
+            const compositeKey = getCompositePageKey(initialParam);
+            const baseKey = getBaseKey();
+            const entry = cache.get(compositeKey, baseKey);
             const staleTime = props.content.staleTime ?? 0;
 
             if (
@@ -241,7 +259,6 @@ export default {
                 !checkIsStale(entry.fetchedAt, staleTime) &&
                 pages.value.length > 0
             ) {
-                // Data is fresh — just emit current state
                 emitState();
                 return;
             }
@@ -252,7 +269,6 @@ export default {
             emitState();
 
             try {
-                // Reset pages for initial fetch
                 pages.value = [];
                 pageParams.value = [];
 
@@ -370,9 +386,8 @@ export default {
 
             try {
                 for (const param of currentPageParams) {
-                    // Invalidate each page cache entry so we get fresh data
-                    const cacheKey = hashKey([props.content.queryKey, 'page', param]);
-                    cache.invalidate(cacheKey);
+                    const compositeKey = getCompositePageKey(param);
+                    cache.invalidate(compositeKey);
                     await fetchPage(param, 'next');
                 }
 
@@ -393,10 +408,10 @@ export default {
         }
 
         function resetPages() {
-            // Invalidate all page cache entries
+            // Invalidate all page cache entries for this family
             for (const param of pageParams.value) {
-                const cacheKey = hashKey([props.content.queryKey, 'page', param]);
-                cache.invalidate(cacheKey);
+                const compositeKey = getCompositePageKey(param);
+                cache.invalidate(compositeKey);
             }
             pages.value = [];
             pageParams.value = [];
@@ -406,16 +421,12 @@ export default {
             status.value = QueryStatus.IDLE;
             emitState();
 
-            // Re-fetch initial page
             initialFetch();
         }
 
         function invalidate() {
-            for (const param of pageParams.value) {
-                const cacheKey = hashKey([props.content.queryKey, 'page', param]);
-                cache.invalidate(cacheKey);
-            }
-            // Also refetch
+            // Invalidate the ENTIRE query key family (all params × all pages)
+            cache.invalidateByKey(getBaseKey());
             refetchAll();
         }
 
@@ -426,7 +437,6 @@ export default {
         onMounted(() => {
             initialFetch();
 
-            // Set up refetchOnWindowFocus
             if (props.content.refetchOnWindowFocus && typeof document !== 'undefined') {
                 visibilityHandler = () => {
                     if (document.visibilityState === 'visible' && (props.content.enabled ?? true)) {
@@ -439,7 +449,6 @@ export default {
                 document.addEventListener('visibilitychange', visibilityHandler);
             }
 
-            // Set up refetchInterval
             const interval = props.content.refetchInterval ?? 0;
             if (interval > 0) {
                 refetchIntervalId = setInterval(() => {
@@ -451,27 +460,26 @@ export default {
         });
 
         onBeforeUnmount(() => {
-            // Clean up visibility listener
             if (visibilityHandler && typeof document !== 'undefined') {
                 document.removeEventListener('visibilitychange', visibilityHandler);
             }
 
-            // Clean up refetch interval
             if (refetchIntervalId) {
                 clearInterval(refetchIntervalId);
             }
 
             // Schedule GC for all page cache entries
             const cacheTime = props.content.cacheTime ?? 300000;
+            const baseKey = getBaseKey();
             for (const param of pageParams.value) {
-                const cacheKey = hashKey([props.content.queryKey, 'page', param]);
-                cache.scheduleGC(cacheKey, cacheTime);
+                const compositeKey = getCompositePageKey(param);
+                cache.scheduleGC(compositeKey, cacheTime, baseKey);
             }
         });
 
         // --- Watchers ---
         watch(
-            () => [props.content.queryKey, props.content.endpoint],
+            () => [props.content.queryKey, props.content.endpoint, props.content.params],
             () => {
                 resetPages();
             }

@@ -8,11 +8,16 @@ import { hashKey, isStale, QueryStatus } from './utils.js';
  * - Subscribes/unsubscribes from the global QueryCache
  * - Handles staleTime / refetchInterval / refetchOnWindowFocus
  * - Reports state changes via an onChange callback
+ *
+ * Cache keys are structured as:
+ *   - baseKey:      hashKey(queryKey) — the family identifier
+ *   - compositeKey: hashKey([queryKey, params]) — the specific variation
  */
 export class QueryObserver {
     /**
      * @param {Object}   options
      * @param {*}        options.queryKey            - Unique key (string, array, or object)
+     * @param {Object}   [options.params={}]         - Query parameters (the variation)
      * @param {Function} options.fetchFn             - Async function returning data
      * @param {number}   [options.staleTime=0]       - ms data is considered fresh
      * @param {number}   [options.cacheTime=300000]  - ms to keep unused cache entries (5 min)
@@ -31,11 +36,12 @@ export class QueryObserver {
             refetchInterval: 0,
             refetchOnWindowFocus: true,
             enabled: true,
+            params: {},
             ...options,
         };
 
         this._cache = getQueryCache();
-        this._hashedKey = hashKey(this._options.queryKey);
+        this._updateKeys();
         this._unsubscribe = null;
         this._refetchIntervalId = null;
         this._mounted = false;
@@ -46,6 +52,21 @@ export class QueryObserver {
     }
 
     /**
+     * Compute the base key and composite key from current options.
+     * @private
+     */
+    _updateKeys() {
+        this._baseKey = hashKey(this._options.queryKey);
+        const params = this._options.params;
+        // If params is empty/null, composite key equals base key
+        if (!params || (typeof params === 'object' && Object.keys(params).length === 0)) {
+            this._compositeKey = this._baseKey;
+        } else {
+            this._compositeKey = hashKey([this._options.queryKey, params]);
+        }
+    }
+
+    /**
      * Mount the observer: subscribe to cache, start timers, perform initial fetch if needed.
      */
     mount() {
@@ -53,7 +74,11 @@ export class QueryObserver {
         this._mounted = true;
 
         // Subscribe to cache updates
-        this._unsubscribe = this._cache.subscribe(this._hashedKey, this._handleCacheUpdate);
+        this._unsubscribe = this._cache.subscribe(
+            this._compositeKey,
+            this._handleCacheUpdate,
+            this._baseKey
+        );
 
         // Set up refetchOnWindowFocus
         if (this._options.refetchOnWindowFocus && typeof document !== 'undefined') {
@@ -71,7 +96,7 @@ export class QueryObserver {
 
         // Initial fetch
         if (this._options.enabled) {
-            const entry = this._cache.get(this._hashedKey);
+            const entry = this._cache.get(this._compositeKey, this._baseKey);
             if (entry.status === QueryStatus.IDLE || isStale(entry.fetchedAt, this._options.staleTime)) {
                 this._executeFetch();
             } else {
@@ -80,7 +105,7 @@ export class QueryObserver {
             }
         } else {
             // Emit idle state
-            this._emitState(this._cache.get(this._hashedKey));
+            this._emitState(this._cache.get(this._compositeKey, this._baseKey));
         }
     }
 
@@ -109,7 +134,7 @@ export class QueryObserver {
         }
 
         // Schedule garbage collection
-        this._cache.scheduleGC(this._hashedKey, this._options.cacheTime);
+        this._cache.scheduleGC(this._compositeKey, this._options.cacheTime, this._baseKey);
     }
 
     /**
@@ -121,11 +146,22 @@ export class QueryObserver {
     }
 
     /**
-     * Invalidate cached data, forcing next access to refetch.
-     * Also triggers an immediate refetch if mounted and enabled.
+     * Invalidate ALL cached data for this query key family (all param variations).
+     * Also triggers an immediate refetch of the current params if mounted and enabled.
      */
     invalidate() {
-        this._cache.invalidate(this._hashedKey);
+        this._cache.invalidateByKey(this._baseKey);
+        if (this._mounted && this._options.enabled) {
+            this._executeFetch();
+        }
+    }
+
+    /**
+     * Invalidate only the current param variation's cache entry.
+     * Use invalidate() to invalidate the entire family.
+     */
+    invalidateCurrent() {
+        this._cache.invalidate(this._compositeKey);
         if (this._mounted && this._options.enabled) {
             this._executeFetch();
         }
@@ -136,26 +172,30 @@ export class QueryObserver {
      * @param {Object} newOptions
      */
     updateOptions(newOptions) {
-        const oldKey = this._hashedKey;
+        const oldCompositeKey = this._compositeKey;
         const oldOptions = { ...this._options };
 
         Object.assign(this._options, newOptions);
-        this._hashedKey = hashKey(this._options.queryKey);
+        this._updateKeys();
 
-        // If the query key changed, re-subscribe
-        if (this._hashedKey !== oldKey && this._mounted) {
+        // If the composite key changed (params or queryKey changed), re-subscribe
+        if (this._compositeKey !== oldCompositeKey && this._mounted) {
             // Unsubscribe from old
             if (this._unsubscribe) {
                 this._unsubscribe();
             }
-            this._cache.scheduleGC(oldKey, this._options.cacheTime);
+            this._cache.scheduleGC(oldCompositeKey, this._options.cacheTime, this._baseKey);
 
             // Subscribe to new
-            this._unsubscribe = this._cache.subscribe(this._hashedKey, this._handleCacheUpdate);
+            this._unsubscribe = this._cache.subscribe(
+                this._compositeKey,
+                this._handleCacheUpdate,
+                this._baseKey
+            );
 
             // Fetch new key if enabled
             if (this._options.enabled) {
-                const entry = this._cache.get(this._hashedKey);
+                const entry = this._cache.get(this._compositeKey, this._baseKey);
                 if (
                     entry.status === QueryStatus.IDLE ||
                     isStale(entry.fetchedAt, this._options.staleTime)
@@ -184,7 +224,7 @@ export class QueryObserver {
 
         // Handle enabled change
         if (!oldOptions.enabled && this._options.enabled && this._mounted) {
-            const entry = this._cache.get(this._hashedKey);
+            const entry = this._cache.get(this._compositeKey, this._baseKey);
             if (
                 entry.status === QueryStatus.IDLE ||
                 isStale(entry.fetchedAt, this._options.staleTime)
@@ -209,15 +249,35 @@ export class QueryObserver {
      * @returns {Object}
      */
     getState() {
-        const entry = this._cache.get(this._hashedKey);
+        const entry = this._cache.get(this._compositeKey, this._baseKey);
         return this._buildState(entry);
+    }
+
+    /**
+     * Get the base key (family identifier) for this observer.
+     * @returns {string}
+     */
+    getBaseKey() {
+        return this._baseKey;
+    }
+
+    /**
+     * Get the composite key (specific params variation) for this observer.
+     * @returns {string}
+     */
+    getCompositeKey() {
+        return this._compositeKey;
     }
 
     // --- Private ---
 
     async _executeFetch() {
         try {
-            const data = await this._cache.fetch(this._hashedKey, this._options.fetchFn);
+            const data = await this._cache.fetch(
+                this._compositeKey,
+                this._options.fetchFn,
+                this._baseKey
+            );
             if (this._options.onSuccess) {
                 this._options.onSuccess(data);
             }
@@ -239,7 +299,7 @@ export class QueryObserver {
     _handleVisibilityChange() {
         if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
             if (this._options.enabled) {
-                const entry = this._cache.get(this._hashedKey);
+                const entry = this._cache.get(this._compositeKey, this._baseKey);
                 if (isStale(entry.fetchedAt, this._options.staleTime)) {
                     this._executeFetch().catch(() => { }); // Errors handled in _executeFetch
                 }

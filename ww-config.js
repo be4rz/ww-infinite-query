@@ -11,6 +11,7 @@ export default {
         customSettingsPropertiesOrder: [
             'queryKey',
             'endpoint',
+            'params',
             ['method', 'contentType'],
             'headers',
             'body',
@@ -82,7 +83,7 @@ export default {
             bindingValidation: {
                 type: 'string',
                 tooltip:
-                    'A unique identifier for this infinite query. Used as the cache key.',
+                    'The cache family name for this infinite query (e.g. "posts"). All param variations share this key. Invalidating this key clears all cached variations and pages.',
             },
             /* wwEditor:end */
         },
@@ -96,7 +97,21 @@ export default {
             bindingValidation: {
                 type: 'string',
                 tooltip:
-                    'The base URL to fetch data from. The page parameter will be appended as a query param. Example: "https://api.example.com/posts"',
+                    'The base URL to fetch. Params + page param will be appended as query string for GET. Example: "https://api.example.com/posts"',
+            },
+            /* wwEditor:end */
+        },
+        params: {
+            label: { en: 'Query params' },
+            type: 'Object',
+            section: 'settings',
+            bindable: true,
+            defaultValue: {},
+            /* wwEditor:start */
+            bindingValidation: {
+                type: 'object',
+                tooltip:
+                    'Additional query parameters (filters, etc.). For GET: appended as query string alongside page param. For POST: merged into body. Different params create separate cache entries under the same query key family.',
             },
             /* wwEditor:end */
         },
