@@ -1,0 +1,13 @@
+{
+    "name": "ww-infinite-query",
+    "version": "1.0.0",
+    "description": "WeWeb infinite query component with React Query-like pagination and caching",
+    "scripts": {
+        "build": "weweb build",
+        "serve": "weweb serve"
+    },
+    "devDependencies": {
+        "@weweb/cli": "latest"
+    },
+    "license": "MIT"
+}
